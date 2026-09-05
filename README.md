@@ -1,14 +1,23 @@
-# Fable orchestrator
+# Fable Orchestrator — Sovereign Dual-GPU Edition
 
-Fable is a small, local-first routing skill for Codex. Claude Fable 5.1 plans and adjudicates; it does not write code or own the workspace. Codex remains the runtime and delegates bounded implementation work to OpenCode Go agents:
+**Fork of [codejunkie99/fable-orchestrator](https://github.com/codejunkie99/fable-orchestrator)** for local AI workstations.
 
-- GPT-5.6 Luna handles normal implementation.
-- DeepSeek V4 Flash handles loops, repeated iteration, and high-throughput implementation.
-- Fable 5.1 remains outside the implementation graph for planning and final adjudication.
+| Role | Default | Hardware / cost |
+|------|---------|-----------------|
+| **Brain (orchestrator)** | Claude Fable 5.1, GPT‑5.6 Luna, or Grok | Cloud — few tokens (plan + adjudicate only) |
+| **Worker Heavy** | LiteLLM `coder` | **CMP 170HX 64 GB** — large context, main implementation |
+| **Worker Flash** | LiteLLM `sidekick` / `fast` | **RTX 3090** — loops, tests, mechanical work |
 
-The skill consumes the callable `opencode-go/` and `opencode-go-responses/` agents supplied by Codex Router. It does not ship a proxy, dashboard, model catalog, credential store, or API key. Configure OpenCode Go once in the router, then restart Codex after changing provider or agent definitions.
+The brain **never** writes production code. Workers do the token volume via local OpenAI-compatible APIs (`http://127.0.0.1:4000/v1`).
 
-![Fable orchestrator: planning, implementation, and verification](assets/fable-orchestrator.svg)
+```text
+Cloud Brain ──packet──► task graph
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                           ▼
+     local-heavy (170HX)          local-flash (3090)
+         coder                        sidekick/fast
+```
 
 ## Repository layout
 
@@ -16,51 +25,81 @@ The skill consumes the callable `opencode-go/` and `opencode-go-responses/` agen
 skill/fable/
 ├── SKILL.md
 ├── agents/openai.yaml
-└── scripts/ask_fable.sh
-assets/fable-orchestrator.svg
+└── scripts/
+    ├── ask_fable.sh      # multi-brain helper (Claude / OpenAI / xAI)
+    ├── fable-tui.sh      # interactive brain + worker selection
+    └── worker-menu.sh    # prints callable local worker menu
+config/
+└── defaults.env          # env template (no secrets committed)
 install.sh
 tests/test_skill.sh
 ```
 
-The three files under `skill/fable/` are the installable skill. `ask_fable.sh` is executable and invokes Claude Code's local `fable` alias with no session persistence. The packet passed to it must contain decisions and workspace facts only; never put credentials in a packet.
-
 ## Install
-
-From this repository:
 
 ```bash
 ./install.sh --dry-run
 ./install.sh --copy
+# optional: also install CLI helpers to /usr/local/bin (needs sudo)
+./install.sh --copy --system-bins
 ```
 
-`--dry-run` prints the exact destination and copy operations without creating files. `--copy` installs to `~/.codex/skills/fable`, creates only the required directories, and is safe to run again. Use `--target DIR` to select another skills directory:
+Codex skill path default: `~/.codex/skills/fable`.  
+Workstation path (AI OS): `/opt/ai/fable-orchestrator`.
+
+## Configure
 
 ```bash
-./install.sh --copy --target "$PWD/.local/codex/skills"
+cp config/defaults.env ~/.config/fable-orchestrator/env
+# edit keys for the cloud brain only — workers use local sk-local-sovereign
+source ~/.config/fable-orchestrator/env
 ```
 
-The installer reads only this repository and the destination path. It never reads, creates, or modifies credentials. Start a new Codex task after changing the provider or agent definitions.
+Or use the TUI (no keys in the repo):
+
+```bash
+./skill/fable/scripts/fable-tui.sh
+# or after install:
+fable-tui
+```
 
 ## Use
 
-Invoke the skill with an objective:
-
-```text
+```bash
+# Classic skill invocation (Codex / agent runtime)
 $fable build the feature
+
+# Direct brain call with packet
+printf '%s' "$PACKET" | ask_fable.sh
+
+# TUI: pick brain + workers, then paste objective
+fable-tui
 ```
 
-Fable returns a bounded graph. Codex validates the graph, starts ready workers in parallel when useful, collects their evidence, verifies the result, and asks Fable to adjudicate when the task needs another decision. Every implementation node must use GPT-5.6 Luna or DeepSeek V4 Flash. If neither allowed OpenCode Go route is callable, the workflow reports the blocker instead of inventing a model.
+Workers are always selected from the **callable menu** (LiteLLM aliases bound to dual GPUs). If a GPU backend is down, the menu reports it — no silent substitution.
+
+## Dual-GPU mapping (Butterweck / Sovereign Agent OS)
+
+| LiteLLM alias | Role | Typical backend |
+|---------------|------|-----------------|
+| `coder` | local-heavy | vLLM / llama-server on **CMP 170HX** (large ctx) |
+| `sidekick` / `fast` | local-flash | llama-server on **RTX 3090** |
+| `reasoner` | optional critique | qwq / local reasoner port |
+
+Override with env:
+
+```bash
+export FABLE_WORKER_HEAVY=coder
+export FABLE_WORKER_FLASH=sidekick
+export FABLE_LITELLM_BASE=http://127.0.0.1:4000/v1
+```
 
 ## Test
-
-Run the repository's dependency-light checks:
 
 ```bash
 tests/test_skill.sh
 ```
 
-The test checks shell syntax, the copied source files, required routing strings, basic YAML structure, optional `xmllint` XML validation, SVG safety constraints, a temporary-home dry run, an idempotent copy, and common credential-shaped strings. It does not require PyYAML or a live Claude login.
-
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT (upstream). This fork keeps the same license.
