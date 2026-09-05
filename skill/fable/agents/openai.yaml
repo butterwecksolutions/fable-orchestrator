@@ -1,4 +1,4 @@
 interface:
-  display_name: "Fable Orchestrator"
-  short_description: "Plan with Claude Fable, execute with Codex agents"
-  default_prompt: "Use $fable to orchestrate this task with the best available sub-agent models."
+  display_name: "Fable Orchestrator (Sovereign Dual-GPU)"
+  short_description: "Cloud brain plans; local 170HX + 3090 workers implement"
+  default_prompt: "Use $fable to orchestrate this task. Brain plans only; workers are local-heavy (coder/170HX) and local-flash (sidekick/3090)."

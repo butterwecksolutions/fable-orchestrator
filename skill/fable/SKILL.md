@@ -1,111 +1,80 @@
 ---
 name: fable
-description: Use the locally authenticated Claude Code Fable 5.1 model only as the orchestrator for a task, then execute implementation with GPT-5.6 Luna or DeepSeek V4 Flash. Use when the user invokes $fable or asks Fable to orchestrate Codex agents.
+description: >
+  Cloud brain (Claude Fable 5.1, GPT-5.6 Luna, or Grok) orchestrates only.
+  Implementation runs on two local workstation workers via LiteLLM:
+  local-heavy (coder → CMP 170HX, large context) and local-flash (sidekick/fast → RTX 3090).
+  Use when the user invokes $fable or asks for Fable-style orchestration.
 ---
 
-# Fable orchestrator
+# Fable orchestrator — Sovereign Dual-GPU
 
-Claude Fable 5.1 supplies orchestration decisions only. Codex remains the runtime that
-spawns workers, owns files, runs tools, verifies the result, and reports to the
-user.
+The **brain** plans and adjudicates only. It does **not** write production code
+or own the workspace. The **runtime** (Codex, OpenCode, Hermes, or shell) spawns
+workers, owns files, runs tools, verifies, and reports to the user.
+
+## Roles
+
+| Role | Who | Tokens |
+|------|-----|--------|
+| Brain | Fable 5.1 / GPT-5.6 Luna / Grok (user choice) | Few — plan + adjudicate |
+| local-heavy | LiteLLM `coder` on **CMP 170HX 64 GB** | Most implementation, large context |
+| local-flash | LiteLLM `sidekick` or `fast` on **RTX 3090** | Loops, tests, mechanical throughput |
 
 ## Invocation
 
-Treat everything after `$fable` as the objective. Fable 5.1 always owns
-orchestration. Implementation workers are restricted to GPT-5.6 Luna and
-DeepSeek V4 Flash:
+Treat everything after `$fable` as the objective. Optionally set brain/workers
+via env or `fable-tui`:
 
 - `$fable build the feature`
-- `$fable debug this; implementer: gpt-5.6-luna`
+- `$fable debug this; implementer: local-heavy`
+- `FABLE_BRAIN=xai fable-tui`
 
-Model names are requests, not guesses. Before dispatch, inspect the current
-`spawn_agent` tool description and custom agent roles. Use only models or roles
-that are currently callable. If a requested model is unavailable, say so and
-use the closest available choice only when that substitution is low-risk;
-otherwise ask for a replacement.
+Model names are requests, not guesses. Before dispatch, use the callable menu
+from `scripts/worker-menu.sh`. Use only workers that report **up**. If a
+requested worker is down, say so; substitute only when low-risk, otherwise ask.
 
-For the simplest automatic path, the user can provide only an objective. Apply
-this ordered classifier when they did not explicitly choose a route:
+### Classifier (when user did not pick a worker)
 
-- loop construction, repeated iteration, or high-throughput mechanical work:
-  use a callable OpenCode Go agent pinned to `opencode-go/deepseek-v4-flash`;
-- implementation: use a callable OpenCode Go agent pinned to
-  `opencode-go-responses/gpt-5.6-luna`, then
-  `opencode-go/deepseek-v4-flash`;
-- planning, research, review, and other work: choose by normal task fit.
+1. Loop / repeated iteration / high-throughput mechanical → **local-flash**
+2. Normal implementation / multi-file feature work → **local-heavy**
+3. Planning, review, adjudication → **brain only** (outside worker graph)
 
-Prefer an exposed `agent_type` that pins both model and provider. Never infer
-callability from a config file or send a raw model override across providers.
-An explicit implementation choice wins only when it is GPT-5.6 Luna or DeepSeek
-V4 Flash. Do not assign implementation to any other model. After any applicable
-approval gate, state only `<Agent> — <Model>: <bounded responsibility>`, then
-immediately start. Classify by the callable model pin, not the agent's display
-name. Do not show the full model catalog unless asked.
-
-## OpenCode Go compatibility
-
-Codex Router owns OpenCode Go provider setup, model discovery, and credentials;
-Fable must not duplicate them. A user adds the OpenCode Go API key once through
-the router's local secure setup. Never request or paste an API key in chat or
-store it in a Fable packet. Fable consumes only callable `opencode-go/` and
-`opencode-go-responses/` agents supplied by Codex, so it needs no proxy,
-dashboard, or second static model list. Start a new Codex task after changing
-the provider or agent definitions.
+Never assign implementation to the cloud brain. Never invent a model that is
+not on the callable menu.
 
 ## Workflow
 
-1. Read the objective and relevant local instructions. Inspect enough of the
-   workspace to give Fable facts rather than assumptions.
-2. Build a compact orchestration packet containing the objective, acceptance
-   criteria, workspace context, constraints, protected files, evidence already
-   gathered, callable worker menu, concurrency limit, and user preferences.
-3. Send the packet to `scripts/ask_fable.sh`. Use Claude's `fable` alias; do not
-   read, copy, print, or modify Claude credentials.
-4. Require a bounded task graph with role, model or agent type, owned files or
-   responsibility, dependencies, expected output, verification, and a stop
-   condition for every node. Reject any implementation node assigned to a model
-   other than GPT-5.6 Luna or DeepSeek V4 Flash.
-   Fable 5.1 adjudication remains outside the worker graph.
-5. Validate the graph against the actual task and current tools. Codex has final
-   responsibility for safety and scope. Do not execute invented models, unsafe
-   actions, or work outside the user's request.
-6. Spawn independent ready nodes in parallel, up to the live collaboration
-   limit. Tell every code-writing worker its ownership and that other agents
-   share the workspace, so it must preserve and accommodate their edits.
-7. Collect results, inspect changed files, and run proportionate verification.
-   For complex work, send a concise results packet back through the helper for
-   the next graph or final adjudication. Cap this at three Fable calls unless
-   the user asks to continue.
-8. Finish only when acceptance criteria and verification pass. Report selected
-   models, material changes, and concrete proof.
+1. Read the objective; inspect enough of the workspace for facts.
+2. Build a compact orchestration packet: objective, acceptance criteria,
+   workspace context, constraints, protected files, evidence, **callable worker
+   menu**, concurrency limit (default 2 = one job per GPU), user preferences.
+3. Send the packet to `scripts/ask_fable.sh` (brain selected by `FABLE_BRAIN`).
+4. Require a bounded task graph: id, purpose, dependencies, worker id from the
+   menu, ownership, expected output, verification, stop condition.
+5. Validate graph for safety and scope. Runtime has final say.
+6. Spawn ready nodes in parallel up to `FABLE_MAX_PARALLEL` (typically 2).
+7. Collect results; run `/opt/ai/scripts/qc-lint.sh`, `qc-typecheck.sh`,
+   `qc-test.sh` when available. Cap brain calls at three unless user continues.
+8. Finish only when acceptance criteria pass. Report workers used and proof.
 
-Whenever the helper returns Fable's orchestration output, display it verbatim
-under this exact heading:
+Display brain output under:
 
 ```text
-Fable 5.1 speaks:
+Brain speaks:
 ```
-
-Do not relabel ordinary Codex or worker-agent output as Fable speech.
 
 ## Boundaries
 
-- Fable plans and adjudicates; it does not silently replace the Codex workers.
-- Exchange decisions, evidence, task packets, diffs, test results, and blockers,
-  not hidden reasoning.
-- Orchestration does not expand authorization. Publishing, deployment,
-  destructive operations, spending, and external messages retain their normal
-  approval boundaries.
-- If delegation adds no value, use one worker or execute directly after the
-  Fable plan.
+- Brain plans and adjudicates; it does not replace local workers for code volume.
+- No secrets in packets. Cloud keys stay in env / CLI auth only.
+- Destructive ops, publish, spend keep normal approval gates.
+- If delegation adds no value, one local worker after the plan is enough.
 
-## Calling Fable
-
-Pass the packet as standard input:
+## Calling the brain
 
 ```bash
 printf '%s' "$PACKET" | "$HOME/.codex/skills/fable/scripts/ask_fable.sh"
+# or workstation:
+printf '%s' "$PACKET" | /opt/ai/fable-orchestrator/skill/fable/scripts/ask_fable.sh
 ```
-
-Do not place secrets in the packet. The helper uses the existing local Claude
-Code authentication and creates no persistent Claude session.

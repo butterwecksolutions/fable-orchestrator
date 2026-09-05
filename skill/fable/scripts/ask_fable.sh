@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
+# Multi-brain orchestration helper: Fable (Claude CLI) | OpenAI | xAI Grok.
+# Workers are never invoked here — only the cloud/local brain for the task graph.
 set -euo pipefail
 
-if ! command -v claude >/dev/null 2>&1; then
-  echo "Claude Code CLI is not available on PATH." >&2
-  exit 127
-fi
+load_env() {
+  local f
+  for f in \
+    "${FABLE_ENV:-}" \
+    "$HOME/.config/fable-orchestrator/env" \
+    /opt/ai/fable-orchestrator/config/defaults.env \
+    "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)/config/defaults.env"
+  do
+    [[ -n "$f" && -f "$f" ]] || continue
+    # shellcheck disable=SC1090
+    set -a
+    # strip comments / blank
+    # shellcheck disable=SC1091
+    source <(grep -v '^\s*#' "$f" | grep -v '^\s*$' || true)
+    set +a
+    break
+  done
+}
+load_env
 
 if [[ $# -gt 0 ]]; then
   packet="$*"
@@ -17,40 +34,59 @@ if [[ -z "${packet//[[:space:]]/}" ]]; then
   exit 64
 fi
 
-system_prompt='You are Claude Fable 5.1, the orchestration controller for Codex. You plan and adjudicate only; never assign yourself implementation. Use only the supplied packet. Return a concise executable task graph, not implementation. For each node specify: id, purpose, dependencies, recommended model or agent type chosen only from the supplied callable menu, exclusive file or responsibility ownership, expected output, verification, and stop condition. Every implementation node must use GPT-5.6 Luna or DeepSeek V4 Flash and no other model. Identify nodes safe to run in parallel. Minimize the number of agents. Preserve the user scope and approval boundaries. End with an integration and final-verification node. Do not expose chain-of-thought; provide decisions and brief rationale only.
+BRAIN="${FABLE_BRAIN:-fable}"
+HEAVY="${FABLE_WORKER_HEAVY:-coder}"
+FLASH="${FABLE_WORKER_FLASH:-sidekick}"
 
-Apply this classifier only when the user did not explicitly choose an allowed implementation route. Loop construction, repeated iteration, and high-throughput mechanical work use a callable OpenCode Go agent pinned to opencode-go/deepseek-v4-flash. All other implementation prefers a callable OpenCode Go agent pinned to opencode-go-responses/gpt-5.6-luna, then opencode-go/deepseek-v4-flash. Never assign implementation to any other model. Planning, research, and review use normal task fit but remain orchestration support, not implementation. Fable 5.1 adjudication stays outside the worker graph. Prefer a callable agent_type that pins both model and provider over a raw cross-provider model string, and classify by that pin rather than the agent display name. A model merely discovered in local config is not callable. If neither allowed implementation route is callable, report the blocker; never invent or silently substitute a model or agent. After any applicable approval gate, start the answer with one short line per ready assignment in the form: Agent — Model: bounded responsibility.'
+system_prompt="You are the orchestration controller (brain) for a dual-GPU local coding workstation. You plan and adjudicate only; never assign yourself implementation and never write code. Use only the supplied packet. Return a concise executable task graph, not implementation.
 
-fable_effort="${FABLE_EFFORT:-low}"
-if [[ -n "${FABLE_MODEL:-}" ]]; then
-  model_candidates=("$FABLE_MODEL")
-elif [[ -n "${FABLE_MODEL_CANDIDATES:-}" ]]; then
-  read -r -a model_candidates <<<"$FABLE_MODEL_CANDIDATES"
-else
-  model_candidates=()
-  # Claude Code does not expose a portable model-list command. Derive model IDs
-  # from the user's own settings and usage cache instead of shipping a catalog.
-  if command -v jq >/dev/null 2>&1; then
-    for model_file in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
-      "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json.bak" \
-      "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stats-cache.json"; do
-      [[ -f "$model_file" ]] || continue
-      while IFS= read -r model; do
-        [[ -n "$model" ]] && model_candidates+=("$model")
-      done < <(jq -r '.. | objects | .model? // empty, (.modelUsage? // {} | keys[])' "$model_file" 2>/dev/null)
-    done
+For each node specify: id, purpose, dependencies, recommended worker id chosen ONLY from the supplied callable menu (local-heavy or local-flash), exclusive file or responsibility ownership, expected output, verification, and stop condition.
+
+Worker mapping:
+- local-heavy → LiteLLM model '${HEAVY}' on CMP 170HX 64GB (large context, main implementation)
+- local-flash → LiteLLM model '${FLASH}' on RTX 3090 (loops, tests, mechanical throughput)
+
+Classifier when the user did not choose a worker: mechanical/loop/high-throughput → local-flash; other implementation → local-heavy; planning/review → brain only (outside worker graph). Never assign implementation to the brain or to any model not on the menu. If neither worker is callable, report the blocker; never invent models.
+
+Identify nodes safe to run in parallel (max ${FABLE_MAX_PARALLEL:-2}). Minimize agents. Preserve user scope and approval boundaries. End with an integration and final-verification node (prefer local-flash for test runs). Do not expose chain-of-thought; decisions and brief rationale only.
+
+Start with one short line per ready assignment: Worker — Model: bounded responsibility."
+
+openai_compatible_chat() {
+  local base="$1" key="$2" model="$3"
+  [[ -n "$key" ]] || { echo "Missing API key for brain provider." >&2; return 1; }
+  local payload response
+  payload="$(python3 -c '
+import json,sys
+base_prompt=sys.argv[1]
+packet=sys.argv[2]
+model=sys.argv[3]
+print(json.dumps({
+  "model": model,
+  "temperature": 0.2,
+  "messages": [
+    {"role": "system", "content": base_prompt},
+    {"role": "user", "content": packet},
+  ],
+}))
+' "$system_prompt" "$packet" "$model")"
+  response="$(curl -fsS --max-time 180 \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "${base%/}/chat/completions")"
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["choices"][0]["message"]["content"])' <<<"$response"
+}
+
+run_claude_fable() {
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "Claude Code CLI not on PATH (needed for FABLE_BRAIN=fable)." >&2
+    return 127
   fi
-  # An empty model means: use Claude Code's current locally configured model.
-  ((${#model_candidates[@]})) || model_candidates=("")
-fi
-
-response=""
-selected_model=""
-for model in "${model_candidates[@]}"; do
-  model_args=()
-  [[ -n "$model" ]] && model_args=(--model "$model")
-  set +e
-  candidate_response="$(claude \
+  local fable_effort="${FABLE_EFFORT:-low}"
+  local model_args=()
+  [[ -n "${FABLE_MODEL:-}" ]] && model_args=(--model "$FABLE_MODEL")
+  claude \
     --print \
     "${model_args[@]}" \
     --effort "$fable_effort" \
@@ -59,19 +95,35 @@ for model in "${model_candidates[@]}"; do
     --no-session-persistence \
     --output-format text \
     --system-prompt "$system_prompt" \
-    "$packet" 2>&1)"
-  candidate_status=$?
-  set -e
-  if [[ $candidate_status -eq 0 ]]; then
-    response="$candidate_response"
-    selected_model="${model:-default}"
-    break
-  fi
-done
+    "$packet"
+}
 
-if [[ -z "$selected_model" ]]; then
-  echo "No usable local Claude model was found. Tried: ${model_candidates[*]}." >&2
-  exit 69
-fi
+response=""
+label=""
 
-printf 'Fable 5.1 speaks (%s):\n\n%s\n' "$selected_model" "$response"
+case "$BRAIN" in
+  fable|claude)
+    response="$(run_claude_fable)" || exit $?
+    label="Fable/Claude (${FABLE_MODEL:-default})"
+    ;;
+  openai|luna)
+    response="$(openai_compatible_chat \
+      "${OPENAI_BRAIN_BASE:-https://api.openai.com/v1}" \
+      "${OPENAI_API_KEY:-}" \
+      "${OPENAI_BRAIN_MODEL:-gpt-5.6}")" || exit $?
+    label="OpenAI (${OPENAI_BRAIN_MODEL:-gpt-5.6})"
+    ;;
+  xai|grok)
+    response="$(openai_compatible_chat \
+      "${XAI_BRAIN_BASE:-https://api.x.ai/v1}" \
+      "${XAI_API_KEY:-}" \
+      "${XAI_BRAIN_MODEL:-grok-4}")" || exit $?
+    label="xAI (${XAI_BRAIN_MODEL:-grok-4})"
+    ;;
+  *)
+    echo "Unknown FABLE_BRAIN=$BRAIN (use fable|openai|xai)." >&2
+    exit 64
+    ;;
+esac
+
+printf 'Brain speaks (%s):\n\n%s\n' "$label" "$response"
